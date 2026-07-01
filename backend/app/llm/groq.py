@@ -20,13 +20,34 @@ from groq import AsyncGroq
 from app.llm.base import LLMClient, LLMResponse
 
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
-MAX_RETRIES = 5
-BASE_BACKOFF = 8.0
+# Bounded, fail-fast retries. This runs INSIDE a user request, so the worst case must
+# be a few seconds, not minutes. A short per-minute (TPM) blip is worth one quick retry;
+# a daily (TPD) cap or a multi-second "try again in …" hint is not — we surface it
+# immediately and let the classifier degrade the batch to UNCLASSIFIED.
+MAX_RETRIES = 2
+BASE_BACKOFF = 1.5
+BACKOFF_CAP = 6.0
+# If Groq asks us to wait longer than this, retrying inside the request is pointless.
+MAX_WAIT_HINT = 5.0
 
 
-def _retry_after(err: Exception) -> float | None:
-    m = re.search(r"retry.?after['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)", str(err), re.IGNORECASE)
-    return float(m.group(1)) if m else None
+def _retry_hint(err: Exception) -> float | None:
+    """Seconds Groq suggests waiting, parsed from either a `retry-after` field or its
+    human phrasing ("Please try again in 4m43.392s" / "in 6.5s"). None if absent."""
+    text = str(err)
+    m = re.search(r"retry.?after['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"try again in\s+(?:(\d+)m)?\s*(\d+(?:\.\d+)?)s", text, re.IGNORECASE)
+    if m:
+        minutes = float(m.group(1)) if m.group(1) else 0.0
+        return minutes * 60 + float(m.group(2))
+    return None
+
+
+def _is_daily_cap(err: Exception) -> bool:
+    """A per-DAY token/request cap won't clear within a request — don't retry it."""
+    return bool(re.search(r"per day|\bTPD\b|\bRPD\b", str(err), re.IGNORECASE))
 
 
 class GroqClient(LLMClient):
@@ -68,12 +89,20 @@ class GroqClient(LLMClient):
             except groq.APIStatusError as e:
                 code = getattr(e, "status_code", None)
                 transient = code == 429 or (isinstance(code, int) and code >= 500)
-                if not transient or attempt == MAX_RETRIES - 1:
+                hint = _retry_hint(e)
+                # Fail fast when waiting can't help within a request: a daily cap, a
+                # long suggested wait, a non-transient error, or the last attempt.
+                if (
+                    not transient
+                    or _is_daily_cap(e)
+                    or (hint is not None and hint > MAX_WAIT_HINT)
+                    or attempt == MAX_RETRIES - 1
+                ):
                     raise
-                await asyncio.sleep(_retry_after(e) or backoff)
-                backoff = min(backoff * 2, 60.0)
+                await asyncio.sleep(min(hint or backoff, BACKOFF_CAP))
+                backoff = min(backoff * 2, BACKOFF_CAP)
             except groq.APIConnectionError:
                 if attempt == MAX_RETRIES - 1:
                     raise
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, BACKOFF_CAP)
