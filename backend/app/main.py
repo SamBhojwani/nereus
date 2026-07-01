@@ -135,6 +135,16 @@ async def _cached_pipeline(
     return items
 
 
+@app.get("/")
+async def root() -> dict:
+    # Friendly landing for anyone who hits the bare API URL (e.g. the HF Space page).
+    return {
+        "name": "Nereus API",
+        "description": "Fact-vs-opinion classification over live news, Reddit, and YouTube.",
+        "endpoints": {"health": "/health", "search": "/search?q=...", "feed": "/feed", "docs": "/docs"},
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
     return {
