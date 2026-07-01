@@ -1,0 +1,13 @@
+# Never bake secrets or local cruft into the image. Set keys via HF Space "Secrets".
+.env
+*.env
+!.env.template
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+tests/
+eval/data/
