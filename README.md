@@ -13,11 +13,13 @@ full reasoning.
 
 ## Status
 
-- **Phase 1 — backend spine (in progress).** `/search?q=...` returns live, classified
-  news as JSON. NewsData.io source → normalized `ContentItem` → LLM fact/opinion
-  classifier (batched) → cached JSON.
-- Phase 2 (classifier evaluation), Phase 3 (Reddit + YouTube + React frontend + deploy),
-  Phase 4+ (RAG) — not started.
+- **Phase 1 — backend spine ✅.** `/search?q=...` returns live, classified news as JSON.
+  NewsData.io source → normalized `ContentItem` → LLM fact/opinion classifier (batched) →
+  cached JSON. Provider is swappable (`LLM_PROVIDER=gemini|groq`).
+- **Phase 2 — classifier evaluation ✅.** Measured on 195 hand-labelled items from the
+  pipeline's own output: **accuracy 0.815, macro-F1 0.797** (see [`MODEL_CARD.md`](MODEL_CARD.md)).
+  Harness + a local labelling tool live in [`backend/eval/`](backend/eval/).
+- Phase 3 (Reddit + YouTube + React frontend + deploy), Phase 4+ (RAG) — not started.
 
 ## Layout
 

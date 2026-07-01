@@ -20,7 +20,7 @@ load_dotenv()  # read backend/.env before anything else constructs a client
 
 from app.cache import TTLCache
 from app.classifier.llm import LLMClassifier
-from app.llm.gemini import GeminiClient
+from app.llm.factory import make_llm
 from app.models import ContentItem, SourceType
 from app.pipeline.retrieve import Retriever
 from app.sources.news import NewsDataSource
@@ -33,7 +33,8 @@ PROVIDERS = [
 retriever = Retriever(PROVIDERS)
 
 # Phase 1: the classifier is an LLM behind the swappable LLMClient seam.
-llm = GeminiClient()
+# Provider is chosen by LLM_PROVIDER (gemini|groq) — see app/llm/factory.py.
+llm = make_llm()
 classifier = LLMClassifier(llm)
 
 # Caching is load-bearing: a hit skips BOTH the source APIs and the LLM.
