@@ -16,6 +16,7 @@ degrades an item to UNCLASSIFIED rather than raising.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -44,7 +45,7 @@ _BATCH_INSTRUCTION = (
     "Classify EACH of the {n} numbered items below. Respond with a JSON array of objects, "
     "one per item, in the same order, each of the form:\n"
     '{{"index": <int>, "stance": "factual" | "opinion", "confidence": <0.0-1.0>, '
-    '"rationale": "<one short sentence>"}}\n'
+    '"rationale": "<at most 8 words>"}}\n'
     "Return exactly {n} objects and nothing else.\n\n"
     "ITEMS:\n{block}"
 )
@@ -65,7 +66,7 @@ class LLMClassifier(Classifier):
                 _SINGLE_INSTRUCTION.format(text=_truncate(text)),
                 system=SYSTEM_PROMPT,
                 temperature=0.0,
-                max_tokens=256,
+                max_tokens=96,
             )
             obj = _first_json(resp.text)
             return _to_classification(obj) if obj is not None else _unparseable()
@@ -73,11 +74,17 @@ class LLMClassifier(Classifier):
             return _unparseable()
 
     async def classify_many(self, items: list[ContentItem]) -> list[ContentItem]:
-        """Batch items into chunks; one LLM call per chunk. Order-preserving."""
-        for start in range(0, len(items), self._batch_size):
-            chunk = items[start : start + self._batch_size]
-            results = await self._classify_chunk(chunk)
-            for item, classification in zip(chunk, results):
+        """Batch items into chunks and classify the chunks CONCURRENTLY (one LLM call
+        each). With the retrieval cap keeping a request inside the LLM's per-minute token
+        window, firing the batches in parallel turns ~N/batch serial calls into one round
+        trip. Order-preserving; each chunk degrades to UNCLASSIFIED on its own failure."""
+        chunks = [
+            items[start : start + self._batch_size]
+            for start in range(0, len(items), self._batch_size)
+        ]
+        results = await asyncio.gather(*(self._classify_chunk(c) for c in chunks))
+        for chunk, chunk_results in zip(chunks, results):
+            for item, classification in zip(chunk, chunk_results):
                 item.classification = classification
         return items
 
@@ -97,7 +104,7 @@ class LLMClassifier(Classifier):
                 _BATCH_INSTRUCTION.format(n=len(chunk), block=block),
                 system=SYSTEM_PROMPT,
                 temperature=0.0,
-                max_tokens=128 * len(chunk),
+                max_tokens=48 * len(chunk),
             )
             parsed = _first_json(resp.text)
         except Exception:
@@ -117,7 +124,9 @@ class LLMClassifier(Classifier):
 
 # --- helpers ----------------------------------------------------------------
 
-_MAX_CHARS = 1500  # keep per-item text bounded so a batch fits the token budget
+_MAX_CHARS = 600  # keep per-item text bounded so a batch fits the token budget.
+# Title + a few sentences carries the fact-vs-opinion signal; sending full article
+# bodies just burns the free-tier daily token budget (the binding constraint).
 
 
 def _truncate(text: str) -> str:

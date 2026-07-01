@@ -13,22 +13,29 @@ from __future__ import annotations
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 load_dotenv()  # read backend/.env before anything else constructs a client
 
 from app.cache import TTLCache
 from app.classifier.llm import LLMClassifier
 from app.llm.factory import make_llm
-from app.models import ContentItem, SourceType
+from app.models import ContentItem, SourceType, Stance
 from app.pipeline.retrieve import Retriever
+from app.ratelimit import SlidingWindowLimiter
 from app.sources.news import NewsDataSource
+from app.sources.reddit import RedditSource
+from app.sources.youtube import YouTubeSource
 
 # --- wiring (the only place concrete implementations are named) ---------------
-# Add RedditSource() and YouTubeSource() here in Phase 3 — nothing downstream changes.
+# Each source is one line here; nothing downstream (classifier, cache, API, UI) changes.
+# A source with no credentials just returns [] and reports down in /health.
 PROVIDERS = [
     NewsDataSource(),
+    RedditSource(),
+    YouTubeSource(),
 ]
 retriever = Retriever(PROVIDERS)
 
@@ -41,17 +48,58 @@ classifier = LLMClassifier(llm)
 cache = TTLCache()
 _TTL_SEARCH = float(os.getenv("CACHE_TTL_SEARCH", "300"))
 _TTL_FEED = float(os.getenv("CACHE_TTL_FEED", "900"))
+# When classification wholesale fails (LLM rate-limited/down), the items are fine but
+# every badge is UNCLASSIFIED. Cache that only briefly so results self-heal the moment
+# the token budget returns, instead of serving dead badges for the full TTL.
+_TTL_DEGRADED = float(os.getenv("CACHE_TTL_DEGRADED", "30"))
 _FEED_QUERY = "top news today"
+_MAX_QUERY_LEN = 200  # a topic search; anything longer is abuse and wastes token budget
+
+# CORS: default to the local dev origins; in prod set CORS_ORIGINS to your deployed
+# frontend URL(s), comma-separated. "*" stays available as an explicit opt-out only.
+_CORS_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",") if o.strip()
+]
+
+# Per-IP rate limit on the expensive endpoints — protects the shared free-tier budgets.
+_rate_limiter = SlidingWindowLimiter(
+    max_requests=int(os.getenv("RATE_LIMIT_REQUESTS", "20")),
+    window_seconds=float(os.getenv("RATE_LIMIT_WINDOW", "60")),
+)
+_RATE_LIMITED_PATHS = ("/search", "/feed")
 # ------------------------------------------------------------------------------
 
 app = FastAPI(title="Nereus API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tighten to your frontend origin before deploy
-    allow_methods=["*"],
+    allow_origins=_CORS_ORIGINS,
+    allow_methods=["GET"],        # read-only API; no need to allow the rest
     allow_headers=["*"],
 )
+
+
+def _client_ip(request: Request) -> str:
+    # Behind a proxy (Render/Fly/etc.), the real client is the first X-Forwarded-For hop.
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    if request.url.path in _RATE_LIMITED_PATHS:
+        allowed, retry_after = _rate_limiter.check(_client_ip(request))
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please slow down."},
+                headers={"Retry-After": str(int(retry_after) + 1)},
+            )
+    return await call_next(request)
 
 
 async def _retrieve_and_classify(
@@ -66,6 +114,27 @@ def _cache_key(query: str, sources: list[SourceType] | None) -> str:
     return f"{query.strip().lower()}::{src}"
 
 
+def _mostly_classified(items: list[ContentItem]) -> bool:
+    """True if at least half the items got a real stance — i.e. classification worked."""
+    if not items:
+        return False
+    ok = sum(1 for it in items if it.classification.stance is not Stance.UNCLASSIFIED)
+    return ok >= len(items) / 2
+
+
+async def _cached_pipeline(
+    key: str, query: str, sources: list[SourceType] | None, ttl: float
+) -> list[ContentItem]:
+    """Cache the retrieve+classify unit, but only for `ttl` when classification
+    actually succeeded; degrade to a short TTL so a rate-limited result self-heals."""
+    cached = await cache.get(key)
+    if cached is not None:
+        return cached
+    items = await _retrieve_and_classify(query, sources)
+    await cache.set(key, items, ttl=ttl if _mostly_classified(items) else _TTL_DEGRADED)
+    return items
+
+
 @app.get("/health")
 async def health() -> dict:
     return {
@@ -77,21 +146,17 @@ async def health() -> dict:
 
 @app.get("/search", response_model=list[ContentItem])
 async def search(
-    q: str = Query(..., min_length=1, description="Topic to search for"),
+    q: str = Query(..., min_length=1, max_length=_MAX_QUERY_LEN, description="Topic to search for"),
     sources: list[SourceType] | None = Query(None, description="Filter to these sources"),
 ) -> list[ContentItem]:
-    return await cache.get_or_set(
-        f"search::{_cache_key(q, sources)}",
-        lambda: _retrieve_and_classify(q, sources),
-        ttl=_TTL_SEARCH,
+    return await _cached_pipeline(
+        f"search::{_cache_key(q, sources)}", q, sources, _TTL_SEARCH
     )
 
 
 @app.get("/feed", response_model=list[ContentItem])
 async def feed() -> list[ContentItem]:
     # v1 default feed = a fixed topic set; personalize later.
-    return await cache.get_or_set(
-        f"feed::{_cache_key(_FEED_QUERY, None)}",
-        lambda: _retrieve_and_classify(_FEED_QUERY, None),
-        ttl=_TTL_FEED,
+    return await _cached_pipeline(
+        f"feed::{_cache_key(_FEED_QUERY, None)}", _FEED_QUERY, None, _TTL_FEED
     )

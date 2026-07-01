@@ -8,11 +8,27 @@ swap the classifier without touching anything downstream.
 """
 from __future__ import annotations
 
+import html
 from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _decode_entities(value: Optional[str]) -> Optional[str]:
+    """Source APIs (YouTube especially) return HTML-encoded text — "Trump&#39;s",
+    "&amp;", "&quot;". React renders those verbatim, so decode once here at the boundary."""
+    return html.unescape(value) if value else value
+
+
+def _http_url_or_none(value: Optional[str]) -> Optional[str]:
+    """Keep only http(s) URLs. Sources are third-party; a hostile or buggy one could
+    hand us a `javascript:`/`data:` URL that becomes an XSS vector once rendered into an
+    href or iframe src. Anything that isn't plain http(s) is dropped here, at the boundary."""
+    if value and value.strip().lower().startswith(("http://", "https://")):
+        return value
+    return None
 
 
 class SourceType(str, Enum):
@@ -59,6 +75,16 @@ class ContentItem(BaseModel):
 
     # AI output — populated by the classifier stage
     classification: Classification = Field(default_factory=Classification)
+
+    @field_validator("thumbnail_url", "embed_url")
+    @classmethod
+    def _safe_media_url(cls, v: Optional[str]) -> Optional[str]:
+        return _http_url_or_none(v)
+
+    @field_validator("title", "body", "author")
+    @classmethod
+    def _clean_text(cls, v: Optional[str]) -> Optional[str]:
+        return _decode_entities(v)
 
     def text_for_classification(self) -> str:
         """What the classifier reads. One place to tune later."""
