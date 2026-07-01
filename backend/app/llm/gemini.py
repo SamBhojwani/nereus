@@ -12,14 +12,24 @@ same reason we use the supported `google-genai` SDK, not the deprecated
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from app.llm.base import LLMClient, LLMResponse
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"  # cheaper/faster + larger free daily quota than -flash
+MAX_RETRIES = 5          # transient (429/5xx) retries before giving up
+BASE_BACKOFF = 12.0      # seconds; doubles each retry, capped at 60
+
+
+def _retry_after(err: errors.APIError) -> float | None:
+    """Pull a server-suggested retry delay (e.g. 'retryDelay': '17s') out of a 429, if any."""
+    m = re.search(r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)s", str(err))
+    return float(m.group(1)) if m else None
 
 
 class GeminiClient(LLMClient):
@@ -44,18 +54,30 @@ class GeminiClient(LLMClient):
         if self._client is None:
             raise RuntimeError("GEMINI_API_KEY is not set")
 
-        resp = await self._client.aio.models.generate_content(
-            model=self._model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                # Gemini 2.5 models "think" before answering, and thinking tokens count
-                # against max_output_tokens — a small budget gets fully consumed by
-                # thinking and returns EMPTY text. Classification needs no chain-of-thought,
-                # so disable it: fixes the empty-output failure AND saves quota.
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
+        config = types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            # Gemini 2.5 models "think" before answering, and thinking tokens count
+            # against max_output_tokens — a small budget gets fully consumed by
+            # thinking and returns EMPTY text. Classification needs no chain-of-thought,
+            # so disable it: fixes the empty-output failure AND saves quota.
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
-        return LLMResponse(text=(resp.text or "").strip(), model=self._model_name)
+
+        # Free-tier Gemini is ~10 req/min; bursts hit 429 RESOURCE_EXHAUSTED. Retry
+        # transient errors (429 + 5xx) with exponential backoff so callers don't have to.
+        backoff = BASE_BACKOFF
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = await self._client.aio.models.generate_content(
+                    model=self._model_name, contents=prompt, config=config,
+                )
+                return LLMResponse(text=(resp.text or "").strip(), model=self._model_name)
+            except errors.APIError as e:
+                code = getattr(e, "code", None)
+                transient = code == 429 or (isinstance(code, int) and code >= 500)
+                if not transient or attempt == MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(_retry_after(e) or backoff)
+                backoff = min(backoff * 2, 60.0)
