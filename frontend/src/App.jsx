@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AlertCircle, RotateCcw, SearchX, CloudSun, Vote, Cpu, Percent, Trophy } from "lucide-react";
 import { search as apiSearch, feed as apiFeed } from "./api.js";
 import SearchBar from "./components/SearchBar.jsx";
 import Filters from "./components/Filters.jsx";
@@ -6,7 +7,13 @@ import ContentCard from "./components/ContentCard.jsx";
 import SkeletonCard from "./components/SkeletonCard.jsx";
 
 const ALL_SOURCES = ["news", "reddit", "youtube"];
-const EXAMPLE_TOPICS = ["Climate change", "Elections", "Artificial intelligence", "Interest rates", "Premier League"];
+const EXAMPLE_TOPICS = [
+  { label: "Climate change", Icon: CloudSun },
+  { label: "Elections", Icon: Vote },
+  { label: "Artificial intelligence", Icon: Cpu },
+  { label: "Interest rates", Icon: Percent },
+  { label: "Premier League", Icon: Trophy },
+];
 
 export default function App() {
   const [items, setItems] = useState([]);
@@ -84,9 +91,11 @@ export default function App() {
 
       <div className="examples">
         <span className="examples-label">Try</span>
-        {EXAMPLE_TOPICS.map((t) => (
-          <button key={t} type="button" className="example-chip"
-                  onClick={() => runSearch(t)}>{t}</button>
+        {EXAMPLE_TOPICS.map(({ label, Icon }) => (
+          <button key={label} type="button" className="example-chip"
+                  onClick={() => runSearch(label)}>
+            <Icon size={14} strokeWidth={1.75} aria-hidden="true" />{label}
+          </button>
         ))}
       </div>
 
@@ -104,8 +113,14 @@ export default function App() {
 
         {status === "error" && (
           <div className="note error">
-            <p>We couldn’t load results just now.</p>
-            <button type="button" className="retry" onClick={retry}>Try again</button>
+            <p className="note-line">
+              <AlertCircle size={18} strokeWidth={2} aria-hidden="true" />
+              We couldn’t load results just now.
+            </p>
+            <button type="button" className="retry" onClick={retry}>
+              <RotateCcw size={15} strokeWidth={2} aria-hidden="true" />
+              Try again
+            </button>
           </div>
         )}
 
@@ -116,7 +131,10 @@ export default function App() {
         )}
 
         {status === "done" && visible.length === 0 && (
-          <p className="note">No items match these filters{query && ` for “${query}”`}.</p>
+          <div className="note note-empty">
+            <SearchX size={28} strokeWidth={1.5} aria-hidden="true" />
+            <p>No items match these filters{query && ` for “${query}”`}.</p>
+          </div>
         )}
 
         {status === "done" && visible.length > 0 && (

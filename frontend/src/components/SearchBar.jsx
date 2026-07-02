@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Search } from "lucide-react";
 
 export default function SearchBar({ onSearch }) {
   const [value, setValue] = useState("");
@@ -14,7 +15,10 @@ export default function SearchBar({ onSearch }) {
         onChange={(e) => setValue(e.target.value)}
         aria-label="Search topic"
       />
-      <button type="submit">Search</button>
+      <button type="submit">
+        <Search size={16} strokeWidth={2} aria-hidden="true" />
+        Search
+      </button>
     </form>
   );
 }
