@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" role="img" aria-label="Nereus — Fact and Opinion, Separated">
+  <rect width="1200" height="300" fill="#f5f1e8"/>
+  <rect x="100" y="34" width="1000" height="1" fill="#e3ddcf"/>
+  <rect x="100" y="266" width="1000" height="1" fill="#e3ddcf"/>
+
+  <text x="600" y="152" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif"
+        font-weight="500" font-size="98" letter-spacing="-2" fill="#1c1813">Nereus</text>
+
+  <text x="600" y="194" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif"
+        font-size="15" letter-spacing="6" fill="#8a8172">FACT &amp; OPINION, SEPARATED</text>
+
+  <g font-family="'Helvetica Neue', Arial, sans-serif" font-weight="600" font-size="15">
+    <rect x="489" y="214" width="104" height="34" rx="17" fill="#e9efe7" stroke="#cfe0cf"/>
+    <circle cx="512" cy="231" r="4" fill="#2f6b4e"/>
+    <text x="552" y="236" text-anchor="middle" fill="#2f6b4e">Factual</text>
+
+    <rect x="607" y="214" width="104" height="34" rx="17" fill="#f4ebdd" stroke="#e6d6bd"/>
+    <circle cx="630" cy="231" r="4" fill="#a1571f"/>
+    <text x="670" y="236" text-anchor="middle" fill="#a1571f">Opinion</text>
+  </g>
+</svg>
