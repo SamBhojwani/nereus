@@ -1,107 +1,136 @@
-# Nereus
+<p align="center">
+  <img src="docs/banner.svg" alt="Nereus — Fact & Opinion, Separated" width="100%">
+</p>
 
-A topic-search media platform. Enter a topic; Nereus pulls **live** content from
-multiple sources, classifies each piece as **factual vs. opinion** with an AI model
-that is *actually evaluated* (precision/recall/F1), and renders everything as faithful
-platform cards. No accounts in v1.
+<p align="center">
+  Search any topic across <b>news, Reddit &amp; YouTube</b> — and see what's <i>reported</i>
+  vs. what's <i>argued</i>,<br>with an AI fact-vs-opinion classifier that's <b>actually evaluated</b>.
+</p>
 
-Named for *Nereus*, the Greek sea-god who could not tell a lie.
+<p align="center">
+  <a href="https://nereus-app.netlify.app">
+    <img src="https://img.shields.io/badge/%E2%96%B6%20live%20demo-nereus--app.netlify.app-16585f?style=for-the-badge" alt="Live demo">
+  </a>
+</p>
 
-See [`BUILD_BRIEF.md`](BUILD_BRIEF.md) for the locked decisions, architecture seams, and
-phase plan. The companion `media-platform-build-plan.md` (kept outside the repo) has the
-full reasoning.
+<p align="center">
+  <img src="https://img.shields.io/badge/classifier%20macro--F1-0.79-2f6b4e?style=flat-square" alt="macro-F1 0.79">
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React">
+  <img src="https://img.shields.io/badge/Vite-5-646CFF?style=flat-square&logo=vite&logoColor=white" alt="Vite">
+</p>
 
-## Status
+---
 
-- **Phase 1 — backend spine ✅.** `/search?q=...` returns live, classified content as JSON.
-  Source → normalized `ContentItem` → LLM fact/opinion classifier (batched) → cached JSON.
-  Provider is swappable (`LLM_PROVIDER=gemini|groq`).
-- **Phase 2 — classifier evaluation ✅.** Measured on 195 hand-labelled items from the
-  pipeline's own output: **accuracy 0.821, macro-F1 0.792** on the operational model
-  `llama-3.1-8b-instant` (see [`MODEL_CARD.md`](MODEL_CARD.md)). Harness + a local labelling
-  tool live in [`backend/eval/`](backend/eval/).
-- **Phase 3 — three sources + frontend ✅.** News (NewsData.io), Reddit (public RSS, auto-
-  upgrades to the OAuth API when creds are set), and YouTube (Data API v3). React (Vite)
-  frontend with an editorial UI, skeleton loading, and scroll-reveal cards.
-- Phase 4+ (RAG retrieval behind the same `retrieve()` seam) — not started.
+Enter a topic. Nereus pulls **live** content from three sources, classifies each item **fact vs.
+opinion**, and renders it as faithful platform cards. Named for *Nereus*, the Greek sea-god who
+could not tell a lie.
 
-### Operational notes
+## ⭐ The differentiator: an *evaluated* classifier
 
-- **The binding constraint is the LLM's free-tier token-per-day budget.** Groq's
-  `llama-3.1-8b-instant` gives 500k/day; a fresh search classifies ~30 items. See the
-  MODEL_CARD for why 8b (not 70b) is the operational model.
-- **Graceful degradation:** if the LLM is rate-limited, items still render with an "Unrated"
-  badge instead of the request hanging; that degraded result is cached only briefly
-  (`CACHE_TTL_DEGRADED`) so it self-heals. The frontend also has a 30s request timeout.
-- **Abuse protection:** `/search` and `/feed` are per-IP rate-limited; CORS is restricted to
-  `CORS_ORIGINS`; all outbound URLs are http(s)-validated before reaching the client.
+Most "AI classifier" projects stop at *"I prompted an LLM."* Nereus **measures** it. I
+hand-labelled **195 items from the app's own live feed** and scored the classifier against them:
 
-## Layout
+|         | Precision | Recall |   F1  |
+|---------|:---------:|:------:|:-----:|
+| Factual |   0.89    |  0.85  | 0.87  |
+| Opinion |   0.68    |  0.76  | 0.72  |
 
+**Accuracy 0.82 · macro-F1 0.79 · 100% coverage** (`llama-3.1-8b-instant`). The full write-up —
+including a confusion matrix, a confidence-threshold sweep, and an honest *"where it breaks"*
+error analysis — is in **[MODEL_CARD.md](MODEL_CARD.md)**.
+
+> The label isn't presented as gospel: the UI drops the raw confidence %, explains the method
+> on hover, and shows the model's per-item reasoning. A signal, not a verdict.
+
+## ✨ Features
+
+- **Three live sources, one shape** — news ([NewsData.io](https://newsdata.io)), Reddit (public
+  RSS, auto-upgrades to the OAuth API when creds are set), and YouTube (Data API v3), all
+  normalized into a single `ContentItem`.
+- **Faithful cards** — each source rendered true to its platform: click-to-play YouTube facades,
+  Reddit points/comments, news thumbnails with outlet-logo fallbacks.
+- **Editorial UI** — a warm serif/paper design, skeleton loading, scroll-reveal cards, and a
+  fact/opinion badge with an on-hover rationale.
+- **Built for free tiers** — batched + concurrently-run classification, TTL caching, and
+  **graceful degradation** (items still render as "Unrated" instead of hanging when the LLM is
+  rate-limited).
+- **Hardened** — per-IP rate limiting, restricted CORS, http(s)-only URL sanitization, and a
+  pytest suite.
+- **Swap-ready architecture** — `SourceProvider`, `LLMClient`, `Classifier`, and a `retrieve()`
+  seam mean you can add a source or swap the model in **one line**.
+
+## 🛠 How it works
+
+```mermaid
+flowchart LR
+  Q["topic query"] --> R["retrieve()<br/>fan-out"]
+  R --> N["NewsData"]
+  R --> RD["Reddit RSS"]
+  R --> YT["YouTube"]
+  N --> D["interleave<br/>dedup · cap"]
+  RD --> D
+  YT --> D
+  D --> C["LLM classifier<br/>(batched)"]
+  C --> CA[("TTL cache")]
+  CA --> API["FastAPI · JSON"]
+  API --> UI["React cards"]
 ```
-nereus/
-├── BUILD_BRIEF.md          working spec — read this first
-├── MODEL_CARD.md           classifier evaluation + where it breaks
-├── backend/                FastAPI + the AI core
-│   ├── app/
-│   │   ├── main.py         API: /health /search /feed (+ CORS, rate-limit middleware)
-│   │   ├── models.py       ContentItem — the one normalized shape (+ URL sanitization)
-│   │   ├── cache.py        in-memory TTL cache (a hit skips the source APIs AND the LLM)
-│   │   ├── ratelimit.py    per-IP sliding-window limiter
-│   │   ├── sources/        SourceProvider interface + news / reddit / youtube
-│   │   ├── llm/            LLMClient interface + gemini / groq clients (swappable)
-│   │   ├── classifier/     Classifier interface + LLM classifier (batched, concurrent)
-│   │   └── pipeline/       retrieve() — fan-out, interleave, dedup, cap (RAG socket)
-│   ├── eval/               evaluation harness + local labelling tool
-│   ├── tests/              pytest suite (classifier, retriever, ratelimit, retry, models)
-│   ├── requirements.txt / requirements-dev.txt
-│   └── .env.template       copy to .env and add keys
-└── frontend/               React (Vite) — thin client over the API
-```
 
-## Run the backend
+Every stage sits behind an interface, and concrete implementations are wired in exactly one
+place (`app/main.py`). Phase 4 swaps the body of `retrieve()` for vector search — and nothing
+else changes.
+
+## 🧰 Tech stack
+
+**Backend** — FastAPI · Python 3.12 · httpx · Groq (`llama-3.1-8b-instant`) · in-process TTL cache
+**Frontend** — React 18 · Vite · lucide-react (thin client; zero business logic)
+**Deploy** — Hugging Face Spaces (Docker) + Netlify · see [DEPLOY.md](DEPLOY.md)
+
+## 🚀 Run it locally
 
 ```bash
+# 1) backend
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.template .env          # then fill in GROQ_API_KEY and NEWSDATA_API_KEY (minimum)
-uvicorn app.main:app --reload
-```
+cp .env.template .env          # add GROQ_API_KEY + NEWSDATA_API_KEY (both free, no card)
+uvicorn app.main:app --reload  # → http://127.0.0.1:8000  (/docs for interactive API)
 
-Then:
-
-- `GET http://127.0.0.1:8000/health` — shows which sources/classifier are live
-- `GET http://127.0.0.1:8000/search?q=elections` — live, classified content as JSON
-- `GET http://127.0.0.1:8000/feed` — default topic feed
-- `http://127.0.0.1:8000/docs` — interactive API docs
-
-## Run the frontend
-
-```bash
+# 2) frontend (new terminal)
 cd frontend
-npm install
-npm run dev                    # http://localhost:5173 (proxies /api → backend :8000)
+npm install && npm run dev     # → http://localhost:5173  (proxies /api to the backend)
 ```
-
-For a deployed frontend, set `VITE_API_BASE` to the backend URL and `CORS_ORIGINS`
-(backend) to the frontend's origin.
-
-## Test
 
 ```bash
+# tests + re-run the classifier evaluation
 cd backend && source .venv/bin/activate
-pip install -r requirements-dev.txt
-pytest                         # classifier, retriever, rate limiter, retry policy, models
-python eval/evaluate.py        # re-run the classifier evaluation (reads the labelled CSV)
+pip install -r requirements-dev.txt && pytest
+python eval/evaluate.py        # scores the classifier on the labelled set
 ```
 
-### Keys (all free, no card)
+Without keys the app still boots — each source returns empty and `/health` reports it down.
+Keys: [Groq](https://console.groq.com/keys) · [NewsData](https://newsdata.io/register) ·
+[YouTube](https://console.cloud.google.com) (optional; Reddit needs none).
 
-- **Groq** — https://console.groq.com/keys → `GROQ_API_KEY` (the classifier)
-- **NewsData.io** — https://newsdata.io/register → `NEWSDATA_API_KEY` (news source)
-- **YouTube Data API v3** — https://console.cloud.google.com → `YOUTUBE_API_KEY` (optional)
-- **Reddit** — works with no key (public RSS); add `REDDIT_CLIENT_ID`/`SECRET` to upgrade
-- **Gemini** — https://aistudio.google.com/apikey → `GEMINI_API_KEY` (alternative provider)
+## 📁 Layout
 
-Without keys the app still boots: each source returns empty and `/health` reports it down.
+```
+nereus/
+├── MODEL_CARD.md          classifier evaluation + where it breaks
+├── DEPLOY.md              HF Spaces + Netlify deploy guide
+├── backend/               FastAPI + the AI core
+│   └── app/
+│       ├── main.py        API + middleware (the only place concretes are wired)
+│       ├── models.py      ContentItem — the one normalized shape
+│       ├── sources/       SourceProvider  → news / reddit / youtube
+│       ├── llm/           LLMClient       → groq / gemini (swappable)
+│       ├── classifier/    Classifier      → batched LLM classifier
+│       ├── pipeline/      retrieve()      → fan-out · dedup · cap (the RAG seam)
+│       ├── cache.py · ratelimit.py
+│       └── eval/ · tests/
+└── frontend/              React (Vite) — thin client over the API
+```
+
+<p align="center"><sub>Built as a portfolio project. Design, evaluation, and prose are my own.</sub></p>
