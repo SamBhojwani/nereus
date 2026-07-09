@@ -1,0 +1,40 @@
+# Keeps the free-tier backend fast without burning the LLM budget:
+#   - /health every 10 min  -> the HF Space never goes to sleep (zero token cost)
+#   - /feed   every 6 hours -> the feed cache stays inside its stale-serve window,
+#                              so stale-while-revalidate always has something instant
+#                              to serve (~4 rebuilds/day ≈ 4% of the Groq daily budget)
+#
+# Note: GitHub pauses scheduled workflows after ~60 days without repo activity and
+# emails you to re-enable — any commit resets the clock.
+name: keep-warm
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # keep the Space awake
+    - cron: "0 */6 * * *"    # keep the feed cache warm
+  workflow_dispatch:          # manual trigger, for testing
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping backend
+        run: |
+          API="https://sambhojwani-nereus-api.hf.space"
+          # The 6-hourly schedule (and manual runs) warm the feed; the 10-minute
+          # schedule only touches /health so it never triggers an LLM rebuild.
+          if [ "${{ github.event.schedule }}" = "0 */6 * * *" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PATH_TO_HIT="/feed"
+          else
+            PATH_TO_HIT="/health"
+          fi
+          echo "GET $API$PATH_TO_HIT"
+          # --max-time 120 tolerates a cold container boot; fail the run on HTTP errors
+          # so a dead backend shows up red in the Actions tab.
+          curl --silent --show-error --fail --output /dev/null \
+               --max-time 120 --retry 2 --retry-delay 15 \
+               -w "HTTP %{http_code} in %{time_total}s\n" \
+               "$API$PATH_TO_HIT"
