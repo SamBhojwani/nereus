@@ -21,6 +21,11 @@
     <meta name="twitter:description"
       content="Search a topic across news, Reddit, and YouTube — what's reported, and what's argued." />
 
+    <!-- Warm the API connection while the JS bundle is still loading, so the first
+         /feed fetch skips DNS + TLS setup (~0.3-0.5s). Prod backend origin; harmless
+         in dev where the request goes through the Vite proxy instead. -->
+    <link rel="preconnect" href="https://sambhojwani-nereus-api.hf.space" crossorigin />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!-- Load fonts without blocking first paint: preload the CSS, then promote it to a

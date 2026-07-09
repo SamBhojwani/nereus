@@ -33,6 +33,30 @@ class TTLCache:
                 return None
             return value
 
+    async def get_with_staleness(
+        self, key: str, *, max_stale: float = 0.0
+    ) -> Optional[tuple[Any, bool]]:
+        """Return (value, is_fresh), or None if absent/too old.
+
+        Unlike `get`, an expired entry is NOT evicted immediately: within `max_stale`
+        seconds past expiry it is returned with is_fresh=False, so callers can serve it
+        instantly while they rebuild in the background (stale-while-revalidate). This is
+        what keeps a visitor from ever waiting on the full retrieve+classify pipeline
+        just because a TTL lapsed a minute before they arrived.
+        """
+        async with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            expires_at, value = entry
+            age_past_expiry = time.monotonic() - expires_at
+            if age_past_expiry < 0:
+                return value, True
+            if age_past_expiry < max_stale:
+                return value, False
+            self._store.pop(key, None)
+            return None
+
     async def set(self, key: str, value: Any, *, ttl: float | None = None) -> None:
         async with self._lock:
             self._store[key] = (time.monotonic() + (ttl or self._default_ttl), value)
