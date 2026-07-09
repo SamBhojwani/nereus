@@ -10,7 +10,9 @@ Run locally:  uvicorn app.main:app --reload
 """
 from __future__ import annotations
 
+import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, Request
@@ -52,6 +54,9 @@ _TTL_FEED = float(os.getenv("CACHE_TTL_FEED", "900"))
 # every badge is UNCLASSIFIED. Cache that only briefly so results self-heal the moment
 # the token budget returns, instead of serving dead badges for the full TTL.
 _TTL_DEGRADED = float(os.getenv("CACHE_TTL_DEGRADED", "30"))
+# How long past expiry a cached result may still be served while a background refresh
+# runs (stale-while-revalidate). Feed content ages gracefully; a wait does not.
+_STALE_WINDOW = float(os.getenv("CACHE_STALE_WINDOW", "21600"))
 _FEED_QUERY = "top news today"
 _MAX_QUERY_LEN = 200  # a topic search; anything longer is abuse and wastes token budget
 
@@ -71,7 +76,22 @@ _rate_limiter = SlidingWindowLimiter(
 _RATE_LIMITED_PATHS = ("/search", "/feed")
 # ------------------------------------------------------------------------------
 
-app = FastAPI(title="Nereus API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Warm the default feed in the background at boot. A cold-started container (e.g.
+    # a slept HF Space) begins the retrieve+classify work immediately instead of making
+    # the first visitor pay for it. Fire-and-forget: a warm failure must never block
+    # startup — the request path builds the feed itself if this didn't finish.
+    warm = asyncio.create_task(
+        _refresh_in_background(
+            f"feed::{_cache_key(_FEED_QUERY, None)}", _FEED_QUERY, None, _TTL_FEED
+        )
+    )
+    yield
+    warm.cancel()
+
+
+app = FastAPI(title="Nereus API", version="0.1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -122,17 +142,50 @@ def _mostly_classified(items: list[ContentItem]) -> bool:
     return ok >= len(items) / 2
 
 
-async def _cached_pipeline(
+_refreshing: set[str] = set()  # keys with a background rebuild in flight
+
+
+async def _produce_and_cache(
     key: str, query: str, sources: list[SourceType] | None, ttl: float
 ) -> list[ContentItem]:
-    """Cache the retrieve+classify unit, but only for `ttl` when classification
-    actually succeeded; degrade to a short TTL so a rate-limited result self-heals."""
-    cached = await cache.get(key)
-    if cached is not None:
-        return cached
     items = await _retrieve_and_classify(query, sources)
     await cache.set(key, items, ttl=ttl if _mostly_classified(items) else _TTL_DEGRADED)
     return items
+
+
+async def _refresh_in_background(
+    key: str, query: str, sources: list[SourceType] | None, ttl: float
+) -> None:
+    try:
+        await _produce_and_cache(key, query, sources, ttl)
+    except Exception:
+        pass  # a failed refresh just means we try again on a later request
+    finally:
+        _refreshing.discard(key)
+
+
+async def _cached_pipeline(
+    key: str, query: str, sources: list[SourceType] | None, ttl: float
+) -> list[ContentItem]:
+    """Cache the retrieve+classify unit, stale-while-revalidate style.
+
+    Fresh hit  -> return it.
+    Stale hit  -> return it IMMEDIATELY and rebuild in the background, so a lapsed TTL
+                  costs the visitor nothing (the pipeline can take 4-30s; minutes-old
+                  news served for those seconds is the right trade).
+    Miss       -> build inline (only the very first request ever pays full price).
+
+    Degraded results (classification mostly failed) still get only a short TTL so they
+    self-heal quickly.
+    """
+    entry = await cache.get_with_staleness(key, max_stale=_STALE_WINDOW)
+    if entry is not None:
+        items, fresh = entry
+        if not fresh and key not in _refreshing:
+            _refreshing.add(key)
+            asyncio.create_task(_refresh_in_background(key, query, sources, ttl))
+        return items
+    return await _produce_and_cache(key, query, sources, ttl)
 
 
 @app.get("/")
