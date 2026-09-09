@@ -19,7 +19,14 @@ from groq import AsyncGroq
 
 from app.llm.base import LLMClient, LLMResponse
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+# Groq rotates its lineup and decommissions models (the Llama chat models were retired
+# ~Sept 2026). Keep this current and, per BUILD_BRIEF, never rely on it — set GROQ_MODEL.
+DEFAULT_MODEL = "openai/gpt-oss-20b"
+# Current Groq chat models are reasoning models: they spend completion tokens on hidden
+# reasoning before the answer. "low" keeps that overhead small (~3x fewer tokens than the
+# default) while staying accurate on this task. Set GROQ_REASONING_EFFORT="" to omit it
+# (e.g. for a non-reasoning model that would reject the param).
+DEFAULT_REASONING_EFFORT = "low"
 # Bounded, fail-fast retries. This runs INSIDE a user request, so the worst case must
 # be a few seconds, not minutes. A short per-minute (TPM) blip is worth one quick retry;
 # a daily (TPD) cap or a multi-second "try again in …" hint is not — we surface it
@@ -54,6 +61,8 @@ class GroqClient(LLMClient):
     def __init__(self, api_key: str | None = None, model: str | None = None):
         self._key = api_key or os.getenv("GROQ_API_KEY")
         self._model_name = model or os.getenv("GROQ_MODEL") or DEFAULT_MODEL
+        # env var may be set to "" to disable passing reasoning_effort entirely
+        self._reasoning_effort = os.getenv("GROQ_REASONING_EFFORT", DEFAULT_REASONING_EFFORT)
         self._client = AsyncGroq(api_key=self._key) if self._key else None
 
     def healthcheck(self) -> bool:
@@ -75,15 +84,21 @@ class GroqClient(LLMClient):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        # Reasoning models count hidden reasoning against max_tokens; give them headroom
+        # so the JSON answer isn't truncated (finish_reason=length -> empty content).
+        create_kwargs: dict = dict(
+            model=self._model_name,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if self._reasoning_effort:
+            create_kwargs["reasoning_effort"] = self._reasoning_effort
+
         backoff = BASE_BACKOFF
         for attempt in range(MAX_RETRIES):
             try:
-                resp = await self._client.chat.completions.create(
-                    model=self._model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                resp = await self._client.chat.completions.create(**create_kwargs)
                 text = (resp.choices[0].message.content or "").strip()
                 return LLMResponse(text=text, model=self._model_name)
             except groq.APIStatusError as e:

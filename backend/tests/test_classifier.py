@@ -41,6 +41,21 @@ def test_first_json_returns_none_on_garbage():
     assert _first_json("") is None
 
 
+def test_first_json_recovers_bracketless_object_sequence():
+    # gpt-oss / reasoning models sometimes emit objects without the enclosing [] array
+    raw = '{"index":0,"stance":"factual"} , {"index":1,"stance":"opinion"}'
+    assert _first_json(raw) == [
+        {"index": 0, "stance": "factual"},
+        {"index": 1, "stance": "opinion"},
+    ]
+
+
+def test_first_json_single_object_stays_dict():
+    assert _first_json('{"stance":"opinion","confidence":0.8}') == {
+        "stance": "opinion", "confidence": 0.8,
+    }
+
+
 async def test_batch_maps_results_by_declared_index():
     # Deliberately out of order — mapping must follow the "index" field, not position.
     payload = (

@@ -66,10 +66,14 @@ class LLMClassifier(Classifier):
                 _SINGLE_INSTRUCTION.format(text=_truncate(text)),
                 system=SYSTEM_PROMPT,
                 temperature=0.0,
-                max_tokens=96,
+                # headroom for reasoning models (hidden reasoning + the JSON answer);
+                # max_tokens is a ceiling, so unused budget isn't spent
+                max_tokens=320,
             )
             obj = _first_json(resp.text)
-            return _to_classification(obj) if obj is not None else _unparseable()
+            if isinstance(obj, list):  # model returned a sequence for a single item
+                obj = obj[0] if obj else None
+            return _to_classification(obj) if isinstance(obj, dict) else _unparseable()
         except Exception:
             return _unparseable()
 
@@ -104,7 +108,9 @@ class LLMClassifier(Classifier):
                 _BATCH_INSTRUCTION.format(n=len(chunk), block=block),
                 system=SYSTEM_PROMPT,
                 temperature=0.0,
-                max_tokens=48 * len(chunk),
+                # per-item output + a fixed base for reasoning-model overhead; a ceiling,
+                # so early-stopping calls don't spend it (see GroqClient reasoning note)
+                max_tokens=128 + 64 * len(chunk),
             )
             parsed = _first_json(resp.text)
         except Exception:
@@ -155,24 +161,36 @@ def _to_classification(obj: dict) -> Classification:
 
 def _first_json(text: str):
     """
-    Pull the first JSON value out of an LLM response, tolerating markdown fences
-    and surrounding prose. Returns a dict/list, or None if nothing parses.
+    Pull JSON out of an LLM response, tolerating markdown fences, surrounding prose, and
+    a common reasoning-model quirk: emitting objects comma/newline-separated WITHOUT the
+    enclosing `[ ]` array (e.g. `{...} , {...}`). Returns a dict, a list, or None.
     """
     if not text:
         return None
     # Strip ```json ... ``` fences if present.
     fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    candidate = fenced.group(1) if fenced else text
-    candidate = candidate.strip()
+    candidate = (fenced.group(1) if fenced else text).strip()
+
+    # Whole thing is valid JSON (a proper array or object).
     try:
         return json.loads(candidate)
     except json.JSONDecodeError:
         pass
-    # Fallback: grab the first {...} or [...] span and try that.
-    match = re.search(r"(\{.*\}|\[.*\])", candidate, re.DOTALL)
-    if match:
+
+    # Scan for consecutive JSON values, skipping separators/prose between them. This
+    # recovers bracket-less object sequences that json.loads rejects as a unit.
+    decoder = json.JSONDecoder()
+    values, i, n = [], 0, len(candidate)
+    while i < n:
+        if candidate[i] not in "{[":
+            i += 1
+            continue
         try:
-            return json.loads(match.group(1))
+            value, end = decoder.raw_decode(candidate, i)
+            values.append(value)
+            i = end
         except json.JSONDecodeError:
-            return None
-    return None
+            i += 1
+    if not values:
+        return None
+    return values[0] if len(values) == 1 else values
